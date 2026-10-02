@@ -42,6 +42,11 @@ NAMESERVERS=(
 	"10.64.0.1"
 )
 
+# hosts line of the nsswitch.conf used inside the netns, this keeps name lookups
+# from going to resolvers outside of the netns that are reached through a unix
+# socket (systemd-resolved, avahi), set to empty to use the system nsswitch.conf
+NSSWITCH_HOSTS="files myhostname dns"
+
 # make sure these are empty
 declare -a TEMPFILES=()
 unset netns
@@ -281,13 +286,28 @@ setup_mount_namespace() {
 	printf "nameserver %s\n" "${NAMESERVERS[@]}" > "${tempfile}"
 	chmod 0644 "${tempfile}" || return
 
+	local -a mounts=("mount --bind $(printf -- '%q' "${tempfile}") /etc/resolv.conf")
+
+	if [[ -n ${NSSWITCH_HOSTS} && -r /etc/nsswitch.conf ]]; then
+		TEMPFILES+=("$(mktemp --tmpdir="${TMPDIR:-/tmp}" mullvad-nsswitch-XXXXXX)") || return
+		local nsswitch="${TEMPFILES[-1]}" line
+
+		while IFS= read -r line || [[ -n ${line} ]]; do
+			[[ ${line} =~ ^[[:space:]]*hosts[[:space:]]*: ]] && line="hosts: ${NSSWITCH_HOSTS}"
+			printf -- '%s\n' "${line}"
+		done < /etc/nsswitch.conf > "${nsswitch}" || return
+		chmod 0644 "${nsswitch}" || return
+
+		mounts+=("&& mount --bind $(printf -- '%q' "${nsswitch}") /etc/nsswitch.conf")
+	fi
+
 	# the command is run by the user's shell, which is run by the shell here
 	local run_command
 	run_command="$(printf -- '%q ' "${@}")"
 
 	local -a mountns_command
 	mountns_command=(
-		"mount --bind $(printf -- '%q' "${tempfile}") /etc/resolv.conf"
+		"${mounts[@]}"
 		"&& exec ip netns exec $(printf -- '%q' "${netns}")"
 		"runuser --pty --shell=$(printf -- '%q' "$(command -v bash)") --command=$(printf -- '%q' "${run_command}") - $(printf -- '%q' "${SUDO_USER}")"
 	)

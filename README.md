@@ -36,3 +36,22 @@ Options
 When `--country` is given without `--city`, servers from any city in the
 matching countries are used. Otherwise the `CITY` from the configuration
 applies.
+
+## DNS
+
+Changing the network namespace is not enough to keep name lookups inside the
+tunnel. With the default `nsswitch.conf` of many distributions, lookups go to
+`systemd-resolved` (or avahi for `.local` names) over a unix socket, which
+resolves them outside of the namespace.
+
+So the command runs in a private mount namespace that has its own
+`resolv.conf` and `nsswitch.conf` bind mounted over the ones in `/etc`:
+
+- `resolv.conf` lists the `NAMESERVERS` from the configuration, by default
+  only Mullvad's resolver inside the tunnel (`10.64.0.1`)
+- `nsswitch.conf` is the system one with the `hosts` line replaced by
+  `NSSWITCH_HOSTS` (`files myhostname dns`)
+
+Programs can still reach services outside of the namespace through unix
+sockets, such as D-Bus. If `nscd` is running with its hosts cache enabled,
+lookups go through it and leave the tunnel, so disable that cache.
