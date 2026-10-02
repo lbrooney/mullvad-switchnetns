@@ -47,16 +47,25 @@ NAMESERVERS=(
 # socket (systemd-resolved, avahi), set to empty to use the system nsswitch.conf
 NSSWITCH_HOSTS="files myhostname dns"
 
+# helper that enters a netns as an unprivileged user
+EXEC_HELPER="mullvad-netns-exec"
+
+# these are also compiled in to mullvad-netns-exec, so they are not configurable
+readonly NETNS_RUN_DIR="/run/netns"
+readonly NETNS_ETC_DIR="/etc/netns"
+readonly STATE_DIR="/run/mullvad-netns"
+
 # make sure these are empty
 declare -a TEMPFILES=()
-unset netns
+unset cleanup_netns
 
 
 cleanup() {
-	rm -f "${TEMPFILES[@]}"
+	rm -rf "${TEMPFILES[@]}"
 
 	# remove the network namespace if it's empty
-	[[ -n ${netns} && -z $(ip netns pids "${netns}") ]] && ip netns del "${netns}"
+	[[ -n ${cleanup_netns} && -z $(ip netns pids "${cleanup_netns}" 2>/dev/null) ]] \
+		&& netns_teardown "${cleanup_netns}"
 }
 
 _curl() {
@@ -101,11 +110,11 @@ mullvad_select_random_server() {
 
 	local -a server_list
 	readarray -t server_list < <(_jq -r --arg country "${country}" --arg city "${city}" '
-			.countries[] | select(.name | test($country; "i"))
-			| .cities[] | select(.name | test($city; "i"))
+			.countries[] | select(.name | test($country; "i")) | .name as $country_name
+			| .cities[] | select(.name | test($city; "i")) | .name as $city_name
 			| .relays[]
-			| [.hostname, .public_key, .ipv4_addr_in, .ipv6_addr_in]
-			| join("\t")' "${SERVERS_CACHE}"); wait "${!}" || return
+			| [.hostname, .public_key, .ipv4_addr_in, .ipv6_addr_in, $city_name, $country_name]
+			| join("|")' "${SERVERS_CACHE}"); wait "${!}" || return
 
 	local server_count="${#server_list[@]}"
 	if [[ ${server_count} -eq 0 ]]; then
@@ -218,13 +227,6 @@ setup_interface() {
 		return 1
 	fi
 
-	local endpoint
-	if [[ -n ${ipv6} ]]; then
-		endpoint="[${ipv6_addr}]:${MULLVAD_PORT}"
-	else
-		endpoint="${ipv4_addr}:${MULLVAD_PORT}"
-	fi
-
 	# configure the wireguard interface in the netns
 	if ! ip netns exec "${netns}" wg set "${linkname}" \
 			private-key <(printf -- '%s\n' "${private_key}") \
@@ -261,81 +263,246 @@ setup_interface() {
 	return 0
 }
 
+setup_netns_files() {
+	# write the state of the netns, including the files that get bind mounted
+	# over /etc inside it, to a temporary directory first so they are complete
+	# once they appear
+	if [[ ! -d ${STATE_DIR} ]]; then
+		mkdir -p "${STATE_DIR}" || return
+		chmod 0755 "${STATE_DIR}" || return
+	fi
+
+	TEMPFILES+=("$(mktemp -d "${STATE_DIR}/.${netns}-XXXXXX")") || return
+	local tempdir="${TEMPFILES[-1]}"
+
+	mkdir "${tempdir}/etc" || return
+	printf "nameserver %s\n" "${NAMESERVERS[@]}" > "${tempdir}/etc/resolv.conf" || return
+
+	if [[ -n ${NSSWITCH_HOSTS} && -r /etc/nsswitch.conf ]]; then
+		local line
+		while IFS= read -r line || [[ -n ${line} ]]; do
+			[[ ${line} =~ ^[[:space:]]*hosts[[:space:]]*: ]] && line="hosts: ${NSSWITCH_HOSTS}"
+			printf -- '%s\n' "${line}"
+		done < /etc/nsswitch.conf > "${tempdir}/etc/nsswitch.conf" || return
+	fi
+
+	printf -- '%s=%s\n' \
+		server "${linkname}" \
+		city "${city_name}" \
+		country "${country_name}" \
+		endpoint "${endpoint}" \
+		> "${tempdir}/info" || return
+
+	chmod -R u=rwX,go=rX "${tempdir}" || return
+	mv -T "${tempdir}" "${STATE_DIR}/${netns}" || return
+
+	# let `ip netns exec` and the like use the same files
+	if [[ ! -d ${NETNS_ETC_DIR} ]]; then
+		mkdir -p "${NETNS_ETC_DIR}" || return
+		chmod 0755 "${NETNS_ETC_DIR}" || return
+	fi
+	ln -sfnT "${STATE_DIR}/${netns}/etc" "${NETNS_ETC_DIR}/${netns}"
+}
+
+valid_name() {
+	# mullvad-netns-exec checks names in the same way
+	[[ ${1} =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$ ]]
+}
+
+netns_name_taken() {
+	local name="${1}"
+
+	[[ -e ${NETNS_RUN_DIR}/${name} || -e ${STATE_DIR}/${name} ]] && return 0
+
+	# only replace /etc/netns entries that are links left over from a previous boot
+	if [[ -e ${NETNS_ETC_DIR}/${name} || -L ${NETNS_ETC_DIR}/${name} ]]; then
+		[[ $(readlink -- "${NETNS_ETC_DIR}/${name}") != "${STATE_DIR}/${name}/etc" ]] && return 0
+	fi
+
+	return 1
+}
+
 name_netns() {
-	local name="${linkname}" counter=0
+	local requested="${1}"
+	local name="${requested:-${linkname}}" counter=0
 
 	# make sure the network namespace name isn't already in use
-	while [[ -e /run/netns/${name} ]]; do
+	while netns_name_taken "${name}"; do
+		if [[ -n ${requested} ]]; then
+			printf -- '%s: Namespace name "%s" is already in use\n' "${progname}" "${name}" >&2
+			return 1
+		fi
 		((counter++))
 		name="${linkname}-${counter}"
 	done
 
-	if [[ -z ${name} ]]; then
+	if ! valid_name "${name}"; then
 		printf '%s: could not find a valid netns name\n' "${progname}" >&2
 		return 1
 	fi
 
-	# we will use the linkname as the netns for now
 	netns="${name}"
 }
 
-setup_mount_namespace() {
-	TEMPFILES+=("$(mktemp --tmpdir="${TMPDIR:-/tmp}" mullvad-resolvconf-XXXXXX)") || return
-	local tempfile="${TEMPFILES[-1]}"
-
-	printf "nameserver %s\n" "${NAMESERVERS[@]}" > "${tempfile}"
-	chmod 0644 "${tempfile}" || return
-
-	local -a mounts=("mount --bind $(printf -- '%q' "${tempfile}") /etc/resolv.conf")
-
-	if [[ -n ${NSSWITCH_HOSTS} && -r /etc/nsswitch.conf ]]; then
-		TEMPFILES+=("$(mktemp --tmpdir="${TMPDIR:-/tmp}" mullvad-nsswitch-XXXXXX)") || return
-		local nsswitch="${TEMPFILES[-1]}" line
-
-		while IFS= read -r line || [[ -n ${line} ]]; do
-			[[ ${line} =~ ^[[:space:]]*hosts[[:space:]]*: ]] && line="hosts: ${NSSWITCH_HOSTS}"
-			printf -- '%s\n' "${line}"
-		done < /etc/nsswitch.conf > "${nsswitch}" || return
-		chmod 0644 "${nsswitch}" || return
-
-		mounts+=("&& mount --bind $(printf -- '%q' "${nsswitch}") /etc/nsswitch.conf")
+netns_up() {
+	# bring up a netns connected to a random server, setting netns to its name
+	if [[ -n ${name} ]] && ! valid_name "${name}"; then
+		printf -- '%s: Invalid namespace name "%s"\n' "${progname}" "${name}" >&2
+		return 1
 	fi
 
-	# the command is run by the user's shell, which is run by the shell here
-	local run_command
-	run_command="$(printf -- '%q ' "${@}")"
+	local private_key public_key
+	read -r private_key public_key < <(get_wireguard_keys); wait "${!}" || return
 
-	local -a mountns_command
-	mountns_command=(
-		"${mounts[@]}"
-		"&& exec ip netns exec $(printf -- '%q' "${netns}")"
-		"runuser --pty --shell=$(printf -- '%q' "$(command -v bash)") --command=$(printf -- '%q' "${run_command}") - $(printf -- '%q' "${SUDO_USER}")"
-	)
+	local linkname pubkey ipv4_addr ipv6_addr city_name country_name
+	IFS='|' read -r linkname pubkey ipv4_addr ipv6_addr city_name country_name < \
+		<(mullvad_select_random_server "${country}" "${city}"); wait "${!}" || return
 
-	unshare --mount bash -c "${mountns_command[*]}"
+	name_netns "${name}" || return
+
+	local local_ipv4 local_ipv6
+	mullvad_set_local_ips "${public_key}" || return ${?}
+
+	local endpoint
+	if [[ -n ${ipv6} ]]; then
+		endpoint="[${ipv6_addr}]:${MULLVAD_PORT}"
+	else
+		endpoint="${ipv4_addr}:${MULLVAD_PORT}"
+	fi
+
+	# the files that keep DNS inside the netns must be in place before it can be
+	# entered, from here on take everything down again if anything fails
+	cleanup_netns="${netns}"
+	setup_netns_files || return
+	setup_interface
+}
+
+netns_teardown() {
+	local name="${1}"
+
+	if [[ -e ${NETNS_RUN_DIR}/${name} ]]; then
+		ip netns del "${name}" || return
+	fi
+
+	if [[ -L ${NETNS_ETC_DIR}/${name} && $(readlink -- "${NETNS_ETC_DIR}/${name}") == "${STATE_DIR}/${name}/etc" ]]; then
+		rm -f -- "${NETNS_ETC_DIR:?}/${name}"
+	fi
+	rm -rf -- "${STATE_DIR:?}/${name:?}"
+}
+
+list_netns() {
+	# print the names of the namespaces brought up by mullvad-netns
+	local dir
+	for dir in "${STATE_DIR}"/*/; do
+		[[ -d ${dir} ]] || continue
+		dir="${dir%/}"
+		printf -- '%s\n' "${dir##*/}"
+	done
+}
+
+default_netns() {
+	# use the only namespace that is up if none was given
+	local -a names
+	readarray -t names < <(list_netns)
+
+	case ${#names[@]} in
+		0)
+			printf -- '%s: No namespace is up, bring one up with "sudo %s up"\n' "${progname}" "${progname}" >&2
+			return 1
+		;;
+		1) name="${names[0]}";;
+		*)
+			printf -- '%s: More than one namespace is up, select one with --name: %s\n' "${progname}" "${names[*]}" >&2
+			return 1
+		;;
+	esac
+}
+
+require_root() {
+	if [[ ${EUID} -ne 0 ]]; then
+		printf -- '%s: superuser privileges required\n' "${progname}" >&2
+		return 1
+	elif [[ $(id --group) -ne 0 ]]; then
+		printf -- '%s: must be run with GID 0\n' "${progname}" >&2
+		return 1
+	fi
+}
+
+find_exec_helper() {
+	if ! helper="$(command -v "${EXEC_HELPER}")"; then
+		printf -- '%s: Could not find "%s"\n' "${progname}" "${EXEC_HELPER}" >&2
+		return 1
+	fi
+}
+
+load_config() {
+	# source the config file if it exists
+	[[ -r ${CONFIG_FILE} ]] || return 0
+
+	# when not running as root, the config can't do anything the user couldn't do anyway
+	if [[ ${EUID} -eq 0 ]]; then
+		if [[ $(stat --format='%u:%g' "${CONFIG_FILE}") != 0:0 ]]; then
+			printf -- '%s: Config file "%s" must be owned by root:root\n' "${progname}" "${CONFIG_FILE}" >&2
+			return 1
+		elif [[ $(($(stat --format='0%a' "${CONFIG_FILE}") & 0122)) -ne 0 ]]; then
+			printf -- '%s: Config file "%s" must not be writeable by group or other\n' "${progname}" "${CONFIG_FILE}" >&2
+			return 1
+		fi
+	fi
+
+	source "${CONFIG_FILE}"
 }
 
 show_usage() {
 	printf 'Usage:\n'
-	printf '  %s [options] -- <command>\n' "${progname}"
-	printf '  %s <command>\n\n' "${progname}"
+	printf '  %s up [-n <name>] [options]\n' "${progname}"
+	printf '  %s exec [-n <name>] [--] <command>\n' "${progname}"
+	printf '  %s down [-f] [-a | <name>...]\n' "${progname}"
+	printf '  %s list\n' "${progname}"
+	printf '  %s [run] [options] [--] <command>\n\n' "${progname}"
 	printf 'Run <command> under a network namespace connected to a randomly selected\n'
 	printf 'Mullvad server over WireGuard as the only visible network device. This\n'
 	printf 'ensures that the command does not have access to the network except through\n'
-	printf 'the Mullvad tunnel.\n\nOptions\n'
+	printf 'the Mullvad tunnel.\n\nCommands\n'
+	printf '  up                         bring up a namespace and print its name\n'
+	printf '                               (requires root)\n'
+	printf '  exec                       run <command> as the current user in a namespace\n'
+	printf '                               that is up\n'
+	printf '  down                       take namespaces down (requires root)\n'
+	printf '  list                       list the namespaces that are up\n'
+	printf '  run                        bring up a namespace, run <command> in it as the\n'
+	printf '                               user that ran sudo, and take it down again once\n'
+	printf '                               nothing runs in it any more (requires root, the\n'
+	printf '                               default when no subcommand is given)\n\n'
+	printf 'Options\n'
+	printf '  -n, --name <name>          name of the namespace, for exec this can be left\n'
+	printf '                               out when only one namespace is up\n'
 	printf '  -C, --country <regex>      use only servers from countries matching the\n'
 	printf '                               given regular expression\n'
 	printf '  -c, --city <regex>         use only servers from cities matching the\n'
 	printf '                               given regular expression\n\n'
 	printf '  -4, --ipv4                 connect to the Mullvad server over IPv4 (the default)\n'
 	printf '  -6, --ipv6                 connect to the Mullvad server over IPv6\n\n'
+	printf '  -a, --all                  take down all namespaces\n'
+	printf '  -f, --force                take down namespaces even if processes still run\n'
+	printf '                               in them, they keep the tunnel until they exit\n\n'
 	printf '  -h, --help                 display this help\n'
 }
 
 parse_args() {
-	# parse command line options
+	# parse command line options of the subcommand, setting the variables of
+	# the same name in the caller, with the remaining arguments in args
+	local short long
+	case ${subcommand} in
+		up) short='n:C:c:46h' long='name:,country:,city:,ipv4,ipv6,help';;
+		exec) short='+n:h' long='name:,help';;
+		down) short='afh' long='all,force,help';;
+		list) short='h' long='help';;
+		run) short='+C:c:46h' long='country:,city:,ipv4,ipv6,help';;
+	esac
+
 	local params
-	if ! params="$(getopt -o '+C:c:u:46h' -l 'country:,city:,user:,ipv4,ipv6,help' -n "${progname}" -- "${@}")"; then
+	if ! params="$(getopt -o "${short}" -l "${long}" -n "${progname}" -- "${@}")"; then
 		show_usage
 		return 1
 	fi
@@ -343,6 +510,7 @@ parse_args() {
 	eval set -- "${params}"
 	while [[ ${#} -gt 0 ]]; do
 		case ${1} in
+			-n|--name) name="${2}"; shift;;
 			-C|--country) country=${2}; shift;;
 			-c|--city) city="${2}"; shift;;
 			-4|--ipv4)
@@ -359,19 +527,141 @@ parse_args() {
 				fi
 				ipv6=1
 			;;
+			-a|--all) all=1;;
+			-f|--force) force=1;;
 			-h|--help) show_usage; exit 0;;
 			--) shift; break;;
 		esac
 		shift
 	done
 
-	if [[ -z ${*} ]]; then
-		printf '%s: Must specify a command to run\n' "${progname}"
-		show_usage
+	args=("${@}")
+
+	case ${subcommand} in
+		up|list)
+			if [[ ${#args[@]} -gt 0 ]]; then
+				printf -- '%s: Unexpected argument "%s"\n' "${progname}" "${args[0]}" >&2
+				return 1
+			fi
+		;;
+		exec|run)
+			if [[ ${#args[@]} -eq 0 ]]; then
+				printf '%s: Must specify a command to run\n' "${progname}"
+				show_usage
+				return 1
+			fi
+		;;
+	esac
+
+	# the configured city is only meant for the configured country
+	if [[ ${subcommand} == @(up|run) && ! -v country ]]; then
+		country="${COUNTRY}"
+		city="${city-${CITY}}"
+	fi
+}
+
+cmd_up() {
+	local name country city ipv4 ipv6
+	local -a args
+	parse_args "${@}" || return
+	require_root || return
+
+	local netns
+	netns_up || return
+
+	# keep the netns around
+	unset cleanup_netns
+	printf -- '%s\n' "${netns}"
+}
+
+cmd_exec() {
+	local name
+	local -a args
+	parse_args "${@}" || return
+
+	if [[ -z ${name} ]]; then
+		default_netns || return
+	fi
+
+	local helper
+	find_exec_helper || return
+	exec "${helper}" "${name}" -- "${args[@]}"
+}
+
+cmd_down() {
+	local all force
+	local -a args
+	parse_args "${@}" || return
+	require_root || return
+
+	local -a names=("${args[@]}")
+	if [[ -n ${all} ]]; then
+		if [[ ${#names[@]} -gt 0 ]]; then
+			printf -- '%s: cannot specify both --all and namespace names\n' "${progname}" >&2
+			return 1
+		fi
+		readarray -t names < <(list_netns)
+	elif [[ ${#names[@]} -eq 0 ]]; then
+		local name
+		default_netns || return
+		names=("${name}")
+	fi
+
+	local name ret=0
+	for name in "${names[@]}"; do
+		if ! valid_name "${name}" || [[ ! -d ${STATE_DIR}/${name} ]]; then
+			printf -- '%s: "%s" is not a namespace brought up by %s\n' "${progname}" "${name}" "${progname}" >&2
+			ret=1
+		elif [[ -z ${force} && -e ${NETNS_RUN_DIR}/${name} && -n $(ip netns pids "${name}") ]]; then
+			printf -- '%s: Processes are still running in "%s", use --force to take it down anyway\n' "${progname}" "${name}" >&2
+			ret=1
+		else
+			netns_teardown "${name}" || ret=1
+		fi
+	done
+
+	return ${ret}
+}
+
+cmd_list() {
+	local -a args
+	parse_args "${@}" || return
+
+	local name key value
+	local -A info
+	while read -r name; do
+		info=()
+		while IFS='=' read -r key value; do
+			info[${key}]="${value}"
+		done < "${STATE_DIR}/${name}/info"
+
+		printf -- '%s\t%s\t%s, %s' "${name}" "${info[server]}" "${info[city]}" "${info[country]}"
+		[[ -e ${NETNS_RUN_DIR}/${name} ]] || printf ' (stale)'
+		printf '\n'
+	done < <(list_netns) | column -t -s $'\t'
+}
+
+cmd_run() {
+	local name country city ipv4 ipv6
+	local -a args
+	parse_args "${@}" || return
+	require_root || return
+
+	if [[ -z ${SUDO_USER} ]]; then
+		printf '%s: SUDO_USER is unset, cannot run command as user\n' "${progname}" >&2
 		return 1
 	fi
 
-	args=("${@}")
+	local helper
+	find_exec_helper || return
+
+	local netns
+	netns_up || return
+
+	# cleanup takes the netns down again once the command is done with it
+	runuser --pty --shell="$(command -v bash)" \
+		--command="$(printf -- '%q ' "${helper}" "${netns}" -- "${args[@]}")" \
+		- "${SUDO_USER}"
 }
 
 main() {
@@ -379,55 +669,20 @@ main() {
 	local progname="${BASH_SOURCE[0]##*/}"
 	trap cleanup EXIT
 
-	if [[ ${EUID} -ne 0 ]]; then
-			printf -- '%s: superuser privileges required\n' "${progname}" >&2
-			return 1
-	elif [[ $(id --group) -ne 0 ]]; then
-			printf -- '%s: must be run with GID 0\n' "${progname}" >&2
-			return 1
-	fi
+	load_config || return
 
-	# source the config file if it exists
-	if [[ -r ${CONFIG_FILE} ]]; then
-		if [[ ! -O ${CONFIG_FILE} || ! -G ${CONFIG_FILE} ]]; then
-			printf -- '%s: Config file "%s" must be owned by root:root\n' "${progname}" "${CONFIG_FILE}" >&2
-			return 1
-		elif [[ $(($(stat --format='0%a' "${CONFIG_FILE}") & 0122)) -ne 0 ]]; then
-			printf -- '%s: Config file "%s" must not be writeable by group or other\n' "${progname}" "${CONFIG_FILE}" >&2
-			return 1
-		fi
-		source "${CONFIG_FILE}" || return
-	fi
-
-	if [[ -z ${SUDO_USER} ]]; then
-		printf '%s: SUDO_USER is unset, cannot run command as user\n' "${progname}" >&2
+	if [[ ${#} -eq 0 ]]; then
+		show_usage
 		return 1
 	fi
 
-	local city country ipv4 ipv6
-	local -a args
-	parse_args "${@}" || return
+	local subcommand=run
+	case ${1} in
+		up|exec|down|list|run) subcommand="${1}"; shift;;
+		help) show_usage; return 0;;
+	esac
 
-	# the configured city is only meant for the configured country
-	if [[ ! -v country ]]; then
-		country="${COUNTRY}"
-		city="${city-${CITY}}"
-	fi
-
-	local private_key public_key
-	read -r private_key public_key < <(get_wireguard_keys); wait "${!}" || return
-
-	local linkname pubkey ipv4_addr ipv6_addr
-	read -r linkname pubkey ipv4_addr ipv6_addr < \
-		<(mullvad_select_random_server "${country}" "${city}"); wait "${!}" || return
-
-	name_netns || return
-
-	local local_ipv4 local_ipv6
-	mullvad_set_local_ips "${public_key}" || return ${?}
-
-	setup_interface || return
-	setup_mount_namespace "${args[@]}" || return
+	"cmd_${subcommand}" "${@}"
 }
 
 main "${@}"
