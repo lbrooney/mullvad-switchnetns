@@ -3,4 +3,4 @@
 .*.un~
 *#
 .#*
-/mullvad-netns-exec
+/mullvad-switchnetns-exec

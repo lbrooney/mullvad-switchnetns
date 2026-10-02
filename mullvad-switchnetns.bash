@@ -4,6 +4,7 @@
 #
 # SPDX-License-Identifier: GPL-2.0+
 
+# the configuration is shared with mullvad-netns, which this is based on
 CONFIG_FILE=${MULLVAD_NETNS_CONF:-"/etc/mullvad-netns/config"}
 
 # all these variables can be overriden in the config file
@@ -48,12 +49,12 @@ NAMESERVERS=(
 NSSWITCH_HOSTS="files myhostname dns"
 
 # helper that enters a netns as an unprivileged user
-EXEC_HELPER="mullvad-netns-exec"
+EXEC_HELPER="mullvad-switchnetns-exec"
 
-# these are also compiled in to mullvad-netns-exec, so they are not configurable
+# these are also compiled in to mullvad-switchnetns-exec, so they are not configurable
 readonly NETNS_RUN_DIR="/run/netns"
 readonly NETNS_ETC_DIR="/etc/netns"
-readonly STATE_DIR="/run/mullvad-netns"
+readonly STATE_DIR="/run/mullvad-switchnetns"
 
 # make sure these are empty
 declare -a TEMPFILES=()
@@ -305,7 +306,7 @@ setup_netns_files() {
 }
 
 valid_name() {
-	# mullvad-netns-exec checks names in the same way
+	# mullvad-switchnetns-exec checks names in the same way
 	[[ ${1} =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$ ]]
 }
 
@@ -391,7 +392,7 @@ netns_teardown() {
 }
 
 list_netns() {
-	# print the names of the namespaces brought up by mullvad-netns
+	# print the names of the namespaces brought up by mullvad-switchnetns
 	local dir
 	for dir in "${STATE_DIR}"/*/; do
 		[[ -d ${dir} ]] || continue

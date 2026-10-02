@@ -1,14 +1,22 @@
+# mullvad-switchnetns
+
 Shell script to spawn commands within a network namespace with the only
 visible network link being Mullvad WireGuard tunnel connected to a random
 server (within a certain country and/or city).
 
-Namespaces can be brought up once by root and then used by unprivileged users
-through `mullvad-netns exec`, without needing `sudo` for every command.
+Based on [mullvad-netns](https://github.com/chutz/mullvad-netns) by Patrick
+McLean, with namespaces that unprivileged users can switch to in the way of
+[switch-netns](https://github.com/USSURATONCACHI/switch-netns).
 
-The configuration lives at `/etc/mullvad-netns/config`, it is a shell script
-that is sourced when the program is run. There is a default configuration
+Namespaces can be brought up once by root and then used by unprivileged users
+through `mullvad-switchnetns exec`, without needing `sudo` for every command.
+
+The configuration lives at `/etc/mullvad-netns/config` (the same as for
+mullvad-netns, so an existing setup keeps working), it is a shell script that
+is sourced when the program is run. There is a default configuration
 installed that defines some variables. The location of the configuration file
-can be also overriden by setting the `MULLVAD_NETNS_CONF` environment variable.
+can be also overriden by setting the `MULLVAD_NETNS_CONF` environment
+variable.
 
 As a quick start, one should set their account number. The default location
 of this file is `/etc/mullvad-netns/account`. This file must not be readable
@@ -16,11 +24,11 @@ by anyone other than root.
 
 ```text
 Usage:
-  mullvad-netns up [-n <name>] [options]
-  mullvad-netns exec [-n <name>] [--] <command>
-  mullvad-netns down [-f] [-a | <name>...]
-  mullvad-netns list
-  mullvad-netns [run] [options] [--] <command>
+  mullvad-switchnetns up [-n <name>] [options]
+  mullvad-switchnetns exec [-n <name>] [--] <command>
+  mullvad-switchnetns down [-f] [-a | <name>...]
+  mullvad-switchnetns list
+  mullvad-switchnetns [run] [options] [--] <command>
 
 Run <command> under a network namespace connected to a randomly selected
 Mullvad server over WireGuard as the only visible network device. This
@@ -64,27 +72,27 @@ applies.
 ## Example
 
 ```console
-$ sudo mullvad-netns up -C sweden
+$ sudo mullvad-switchnetns up -C sweden
 se-got-wg-001
-$ mullvad-netns exec -- firefox
-$ mullvad-netns list
+$ mullvad-switchnetns exec -- firefox
+$ mullvad-switchnetns list
 se-got-wg-001  se-got-wg-001  Gothenburg, Sweden
-$ sudo mullvad-netns down
+$ sudo mullvad-switchnetns down
 ```
 
-For a one-off command, `sudo mullvad-netns -C sweden -- <command>` brings up a
-namespace, runs the command as the user that ran `sudo`, and takes the
-namespace down again afterwards.
+For a one-off command, `sudo mullvad-switchnetns -C sweden -- <command>`
+brings up a namespace, runs the command as the user that ran `sudo`, and takes
+the namespace down again afterwards.
 
 ## Entering namespaces without root
 
-`mullvad-netns exec` uses `mullvad-netns-exec`, a small helper installed with
-the `cap_sys_admin` file capability (this is what `make install` sets up). In
-the same way as [switch-netns](https://github.com/USSURATONCACHI/switch-netns),
-it joins the network namespace and then executes the command with all
-privileges dropped. It only enters namespaces brought up by `mullvad-netns`,
-and keeps environment variables such as `TMPDIR` and `LD_LIBRARY_PATH` that the
-C library otherwise removes from programs that gain privileges.
+`mullvad-switchnetns exec` uses `mullvad-switchnetns-exec`, a small helper
+installed with the `cap_sys_admin` file capability (this is what
+`make install` sets up). In the same way as switch-netns, it joins the network
+namespace and then executes the command with all privileges dropped. It only
+enters namespaces brought up by `mullvad-switchnetns`, and keeps environment
+variables such as `TMPDIR` and `LD_LIBRARY_PATH` that the C library otherwise
+removes from programs that gain privileges.
 
 ## DNS
 
@@ -93,8 +101,8 @@ tunnel. With the default `nsswitch.conf` of many distributions, lookups go to
 `systemd-resolved` (or avahi for `.local` names) over a unix socket, which
 resolves them outside of the namespace.
 
-So like `ip netns exec`, `mullvad-netns-exec` runs the command in a private
-mount namespace that has the namespace's own `resolv.conf` and
+So like `ip netns exec`, `mullvad-switchnetns-exec` runs the command in a
+private mount namespace that has the namespace's own `resolv.conf` and
 `nsswitch.conf` bind mounted over the ones in `/etc`:
 
 - `resolv.conf` lists the `NAMESERVERS` from the configuration, by default
@@ -118,8 +126,8 @@ $ sudo make install
 ```
 
 Packages that can't set file capabilities while building can pass `SETCAP=:`
-and run `setcap cap_sys_admin=ep /usr/bin/mullvad-netns-exec` when the package
-is installed instead.
+and run `setcap cap_sys_admin=ep /usr/bin/mullvad-switchnetns-exec` when the
+package is installed instead.
 
 Completions for fish are installed to
 `/usr/share/fish/vendor_completions.d/`. They complete subcommands, namespaces,

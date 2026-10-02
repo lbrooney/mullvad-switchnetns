@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0+
 /*
- * mullvad-netns-exec - run a command in a namespace brought up by mullvad-netns
+ * mullvad-switchnetns-exec - run a command in a namespace brought up by mullvad-switchnetns
  *
  * This lets unprivileged users enter the namespaces in the same way as
  * switch-netns (https://github.com/USSURATONCACHI/switch-netns): it is
@@ -15,7 +15,7 @@
  * socket (systemd-resolved, nscd, avahi). If those files can't be applied, the
  * command is not run.
  *
- * Only namespaces brought up by mullvad-netns can be entered.
+ * Only namespaces brought up by mullvad-switchnetns can be entered.
  */
 
 #define _GNU_SOURCE
@@ -36,12 +36,12 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
-/* these must match the paths used by mullvad-netns */
+/* these must match the paths used by mullvad-switchnetns */
 #ifndef NETNS_RUN_DIR
 #define NETNS_RUN_DIR "/run/netns"
 #endif
 #ifndef STATE_DIR
-#define STATE_DIR "/run/mullvad-netns"
+#define STATE_DIR "/run/mullvad-switchnetns"
 #endif
 
 #define NAME_MAX_LENGTH 64
@@ -51,12 +51,12 @@
 #define EXIT_CANNOT_INVOKE 126
 #define EXIT_ENOENT 127
 
-static const char *progname = "mullvad-netns-exec";
+static const char *progname = "mullvad-switchnetns-exec";
 
 static void usage(FILE *out)
 {
 	fprintf(out, "Usage: %s <name> [--] <command> [args...]\n\n"
-		"Run <command> as the current user in the mullvad-netns namespace <name>.\n",
+		"Run <command> as the current user in the mullvad-switchnetns namespace <name>.\n",
 		progname);
 }
 
@@ -86,7 +86,7 @@ static void __attribute__((format(printf, 3, 4))) format_path(char *buf, size_t 
 }
 
 /*
- * Same rules as valid_name() in mullvad-netns. The name is used to build paths
+ * Same rules as valid_name() in mullvad-switchnetns. The name is used to build paths
  * while holding cap_sys_admin, so this is what keeps them inside their
  * directories.
  */
@@ -113,7 +113,7 @@ static void check_managed(const char *name)
 
 	format_path(path, sizeof(path), STATE_DIR "/%s", name);
 	if (lstat(path, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != 0)
-		die("\"%s\" is not a namespace brought up by mullvad-netns", name);
+		die("\"%s\" is not a namespace brought up by mullvad-switchnetns", name);
 }
 
 static void join_netns(const char *name)
