@@ -284,14 +284,15 @@ setup_mount_namespace() {
 	printf "nameserver %s\n" "${NAMESERVERS[@]}" > "${tempfile}"
 	chmod 0644 "${tempfile}" || return
 
+	# the command is run by the user's shell, which is run by the shell here
 	local run_command
-	run_command="$(printf -- '"%s" ' "${@}")"
+	run_command="$(printf -- '%q ' "${@}")"
 
 	local -a mountns_command
 	mountns_command=(
-		"mount --bind \"${tempfile}\" /etc/resolv.conf"
-		"&& exec ip netns exec \"${netns}\""
-		"runuser --pty --shell=$(command -v bash) --command='${run_command}' - ${SUDO_USER}"
+		"mount --bind $(printf -- '%q' "${tempfile}") /etc/resolv.conf"
+		"&& exec ip netns exec $(printf -- '%q' "${netns}")"
+		"runuser --pty --shell=$(printf -- '%q' "$(command -v bash)") --command=$(printf -- '%q' "${run_command}") - $(printf -- '%q' "${SUDO_USER}")"
 	)
 
 	unshare --mount bash -c "${mountns_command[*]}"
