@@ -180,7 +180,7 @@ get_wireguard_keys() {
 
 	pubkey="$(wg pubkey <<< "${privatekey}")" || return
 
-	printf -- '%s %s\n"' "${privatekey}" "${pubkey}"
+	printf -- '%s %s\n' "${privatekey}" "${pubkey}"
 }
 
 
@@ -363,7 +363,7 @@ main() {
 	trap cleanup EXIT
 
 	if [[ ${EUID} -ne 0 ]]; then
-			printf -- '%s: superuser privileges requires\n' "${progname}" >&2
+			printf -- '%s: superuser privileges required\n' "${progname}" >&2
 			return 1
 	elif [[ $(id --group) -ne 0 ]]; then
 			printf -- '%s: must be run with GID 0\n' "${progname}" >&2
