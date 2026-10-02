@@ -266,7 +266,7 @@ name_netns() {
 	local name="${linkname}" counter=0
 
 	# make sure the network namespace name isn't already in use
-	while ip netns list | grep -q -F -- "${name}"; do
+	while [[ -e /run/netns/${name} ]]; do
 		((counter++))
 		name="${linkname}-${counter}"
 	done
