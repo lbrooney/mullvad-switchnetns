@@ -188,13 +188,6 @@ get_wireguard_keys() {
 
 
 setup_interface() {
-	# script to setup the network namespace
-	local -a setup_script=(
-		"netns add ${netns}"
-		"link add dev ${linkname} type wireguard"
-		"link set netns ${netns} ${linkname}"
-	)
-
 	# scripts that get run for the final steps
 	local -a address_script=(
 		"address add ${local_ipv4} dev ${linkname}"
@@ -213,10 +206,16 @@ setup_interface() {
 		"route add default dev ${linkname} scope global"
 	)
 
-	# initial setup
-	if ! ip -batch - <<< "$(printf '%s\n' "${setup_script[@]}")"; then
-		ip link del "${linkname}" 2>/dev/null
-		ip netns del "${linkname}" 2>/dev/null
+	# initial setup, the wireguard link is created outside of the netns so its
+	# encrypted traffic goes out through the regular network
+	ip netns add "${netns}" || return
+	if ! ip link add dev "${linkname}" type wireguard; then
+		ip netns del "${netns}"
+		return 1
+	fi
+	if ! ip link set dev "${linkname}" netns "${netns}"; then
+		ip link del dev "${linkname}"
+		ip netns del "${netns}"
 		return 1
 	fi
 
@@ -234,14 +233,14 @@ setup_interface() {
 			allowed-ips '0.0.0.0/0,::0/0' \
 			endpoint "${endpoint}"
 	then
-		ip netns del "${linkname}"
+		ip netns del "${netns}"
 		return 1
 	fi
 
 	# load nftables rules in to netns before bringing up interface
 	if [[ -n ${NFTABLES_RULESET} && -r ${NFTABLES_RULESET} ]]; then
 		if ! ip netns exec "${netns}" nft -f "${NFTABLES_RULESET}"; then
-			ip netns del "${linkname}"
+			ip netns del "${netns}"
 			return 1
 		fi
 	fi
@@ -256,7 +255,7 @@ setup_interface() {
 		ip -family inet6 -netns "${netns}" -batch - <<< "$(printf -- "%s\n" "${routes6_script[@]}")"
 	); then
 
-		ip netns del "${linkname}"
+		ip netns del "${netns}"
 		return 1
 	fi
 
