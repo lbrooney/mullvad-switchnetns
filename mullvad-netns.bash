@@ -18,7 +18,7 @@ COUNTRY="usa"
 
 # the default city to select a server from, list of available cities withing a country available with
 #curl -s https://api.mullvad.net/public/relays/wireguard/v1/ | jq ".countries[] | select(.name == \"${COUNTRY}\") | .cities[].name"
-# defaults to any server in California
+# defaults to any server in California, only used when --country is not given
 CITY=", ca"
 
 # file name to find the account in
@@ -87,7 +87,7 @@ mullvad_update_server_list() {
 }
 
 mullvad_select_random_server() {
-	local country="${1:-${COUNTRY}}" city="${2:-${CITY}}"
+	local country="${1}" city="${2}"
 
 	if [[ -r ${SERVERS_CACHE} ]]; then
 		if [[ $(date -u -r "${SERVERS_CACHE}" +%s) -lt $(date -u --date="-${SERVERS_CACHE_MAX_AGE}" +%s) ]]; then
@@ -387,9 +387,15 @@ main() {
 		return 1
 	fi
 
-	local city="${CITY}" country="${COUNTRY}" ipv4 ipv6
+	local city country ipv4 ipv6
 	local -a args
 	parse_args "${@}" || return
+
+	# the configured city is only meant for the configured country
+	if [[ ! -v country ]]; then
+		country="${COUNTRY}"
+		city="${city-${CITY}}"
+	fi
 
 	local private_key public_key
 	read -r private_key public_key < <(get_wireguard_keys); wait "${!}" || return

@@ -32,3 +32,7 @@ Options
 
   -h, --help                 display this help
 ```
+
+When `--country` is given without `--city`, servers from any city in the
+matching countries are used. Otherwise the `CITY` from the configuration
+applies.
