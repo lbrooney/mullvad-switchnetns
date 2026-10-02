@@ -97,22 +97,19 @@ mullvad_select_random_server() {
 		mullvad_update_server_list || return
 	fi
 
-	local country_select city_select
-	[[ -n ${country} ]] && country_select="| select(.name | test(\"${country}\"; \"i\"))"
-	[[ -n ${city} ]] && city_select="| select(.name | test(\"${city}\"; \"i\"))"
-
 	local -a server_list
-	readarray -t server_list < <(_jq -r "
-			(.countries[] ${country_select}
-				| (.cities[] ${city_select}
-					| (.relays[]
-						| [.hostname, .public_key, .ipv4_addr_in, .ipv6_addr_in])
-				)
-			)
-			| flatten
-			| join(\"\\t\")" "${SERVERS_CACHE}"); wait "${!}" || return
+	readarray -t server_list < <(_jq -r --arg country "${country}" --arg city "${city}" '
+			.countries[] | select(.name | test($country; "i"))
+			| .cities[] | select(.name | test($city; "i"))
+			| .relays[]
+			| [.hostname, .public_key, .ipv4_addr_in, .ipv6_addr_in]
+			| join("\t")' "${SERVERS_CACHE}"); wait "${!}" || return
 
 	local server_count="${#server_list[@]}"
+	if [[ ${server_count} -eq 0 ]]; then
+		printf -- '%s: No Mullvad servers match country "%s" and city "%s"\n' "${progname}" "${country}" "${city}" >&2
+		return 1
+	fi
 
 	printf -- '%s\n' "${server_list[$((RANDOM % server_count))]}"
 }
