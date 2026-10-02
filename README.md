@@ -120,3 +120,7 @@ $ sudo make install
 Packages that can't set file capabilities while building can pass `SETCAP=:`
 and run `setcap cap_sys_admin=ep /usr/bin/mullvad-netns-exec` when the package
 is installed instead.
+
+Completions for fish are installed to
+`/usr/share/fish/vendor_completions.d/`. They complete subcommands, namespaces,
+and country and city names from the cached server list.
