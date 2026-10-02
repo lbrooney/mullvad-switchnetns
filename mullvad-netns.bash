@@ -220,7 +220,7 @@ setup_interface() {
 
 	local endpoint
 	if [[ -n ${ipv6} ]]; then
-		endpoint="${ipv6_addr}:${MULLVAD_PORT}"
+		endpoint="[${ipv6_addr}]:${MULLVAD_PORT}"
 	else
 		endpoint="${ipv4_addr}:${MULLVAD_PORT}"
 	fi
